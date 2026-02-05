@@ -24,7 +24,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 import datasets
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
@@ -77,8 +77,20 @@ class DynamicGenDataset(RLHFDataset):
         tokenizer: PreTrainedTokenizer,
         config: DictConfig,
         processor: Optional[ProcessorMixin] = None,
+        max_samples: int = -1,
     ):
-        super().__init__(data_files, tokenizer, config, processor)
+        def _normalize_files(files: str | list[str] | ListConfig | None) -> list[str]:
+            if files is None:
+                return []
+            if isinstance(files, list | ListConfig):
+                return list(files)
+            return [files]
+
+        train_files = _normalize_files(config.get("train_files"))
+        current_files = _normalize_files(data_files)
+        is_train = current_files == train_files and len(current_files) > 0
+        self.skip_base_dataset = bool(config.datagen.get("skip_base_dataset", False)) and is_train
+        super().__init__(data_files, tokenizer, config, processor, max_samples=max_samples)
         self.datagen: AbstractDataGenerator = config.datagen
         assert "datagen" in config and config.datagen.get("path", None) is not None, (
             f"datagen path is not set in config: {config}"
@@ -97,13 +109,28 @@ class DynamicGenDataset(RLHFDataset):
         self.data_generator = datagen_cls(config.datagen)
         self.on_batch_end()
 
+    def _download(self, use_origin_parquet: bool = False):
+        if self.skip_base_dataset:
+            return
+        return super()._download(use_origin_parquet=use_origin_parquet)
+
+    def _read_files_and_tokenize(self):
+        if self.skip_base_dataset:
+            # Start from an empty dataset and rely on datagen to populate it.
+            self.dataframe = datasets.Dataset.from_list([])
+            return
+        return super()._read_files_and_tokenize()
+
     def append_dataframe(self, new_dataframe: datasets.Dataset):
         new_dataframe = self.maybe_filter_out_long_prompts(new_dataframe)
-        self.dataframe = datasets.concatenate_datasets([self.dataframe, new_dataframe])
+        if self.dataframe is None or len(getattr(self.dataframe, "column_names", [])) == 0:
+            self.dataframe = new_dataframe
+        else:
+            self.dataframe = datasets.concatenate_datasets([self.dataframe, new_dataframe])
 
         logger.info(f"new dataset len: {len(self.dataframe)}")
 
-    def on_batch_end(self, batch: DataProto) -> None:
+    def on_batch_end(self, batch: DataProto | None = None) -> None:
         """
         Generate data using the provided data generation strategy.
         Note: This method is intended to change the dataset after each training batch.
