@@ -1,0 +1,20 @@
+question_reciever
+
+tmux 2
+cd /workspace/verl/verl
+source /opt/verl-venv/bin/activate
+apt-get update && apt-get install -y python3-venv python3-pip
+ python3.10 -m venv remote-ven
+ source remote-venv/bin/activate
+  pip install fastapi uvicorn datasets
+pip install -e .
+cd verl/experimental/dynamic_dataset/
+python3 -m verl.experimental.dynamic_dataset.question_reciever --host 127.0.0.1 --port 8080
+
+tmux 3
+
+cd /workspace/verl/verl/
+source remote-venv/bin/activate
+cd verl/experimental/dynamic_dataset/
+export HF_TOKEN=<CHANGE>
+python3 -m verl.experimental.dynamic_dataset.question_submitter --serve --host 127.0.0.1 --port 8090
