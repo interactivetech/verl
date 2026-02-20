@@ -120,6 +120,13 @@ verl is fast with:
 - [PPO in verl](https://verl.readthedocs.io/en/latest/algo/ppo.html)
 - [GRPO in verl](https://verl.readthedocs.io/en/latest/algo/grpo.html)
 
+**Start Dual GRPO Loop (v8):**
+
+- [Dual GRPO Index (start here)](v8-dual-grpo-index.md)
+- [Dual GRPO Smoke Runbook](v8-dual-grpo-runbook-smoke.md)
+- [Dual GRPO Full 1000-Step Runbook](v8-dual-grpo-runbook-full-1000.md)
+- [Dual GRPO Troubleshooting](v8-dual-grpo-troubleshooting.md)
+
 **Running a PPO example step-by-step:**
 
 - [Prepare Data for Post-Training](https://verl.readthedocs.io/en/latest/preparation/prepare_data.html)
