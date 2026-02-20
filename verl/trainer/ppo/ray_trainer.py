@@ -413,13 +413,30 @@ class RayPPOTrainer:
 
         lines = []
         for i in range(n):
-            entry = {k: v[i] for k, v in base_data.items()}
+            entry = {k: self._to_jsonable(v[i]) for k, v in base_data.items()}
             lines.append(json.dumps(entry, ensure_ascii=False))
 
         with open(filename, "w") as f:
             f.write("\n".join(lines) + "\n")
 
         print(f"Dumped generations to {filename}")
+
+    @staticmethod
+    def _to_jsonable(value):
+        """Convert common numpy/torch scalars and containers to JSON-serializable objects."""
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, torch.Tensor):
+            if value.ndim == 0:
+                return value.item()
+            return value.detach().cpu().tolist()
+        if isinstance(value, dict):
+            return {k: RayPPOTrainer._to_jsonable(v) for k, v in value.items()}
+        if isinstance(value, list | tuple):
+            return [RayPPOTrainer._to_jsonable(v) for v in value]
+        return value
 
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
@@ -439,7 +456,7 @@ class RayPPOTrainer:
 
             reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
             if "request_id" in batch.non_tensor_batch:
-                reward_extra_infos_dict.setdefault(
+                reward_extra_infos_to_dump.setdefault(
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
@@ -1357,6 +1374,9 @@ class RayPPOTrainer:
         next_step_profile = False
 
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
+            # Allow custom datasets to refresh bounded snapshots at epoch boundaries.
+            if hasattr(self.train_dataset, "on_epoch_start"):
+                self.train_dataset.on_epoch_start(epoch)
             for batch_dict in self.train_dataloader:
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)

@@ -1,0 +1,454 @@
+# 2122026 Dual v3 Validation + Variable Cycle Size (N=3 and N=16)
+
+Goal:
+- Increase questions exchanged per cycle symmetrically.
+- Keep solver GSM8K validation enabled.
+- Start with stable `N=3`, then stress test `N=16`.
+
+This file gives two presets:
+- Preset A: `N=3` (recommended first)
+- Preset B: `N=16` (stress test, close to your single-GPU baseline style)
+
+Important invariant for both presets:
+- Questioner `actor_rollout_ref.rollout.n = N`
+- Questioner reward `expected_cycle_size = N`
+- Questioner reward `min_required_per_cycle = N`
+- Solver `data.datagen.n_per_batch = N`
+- Solver `data.datagen.snapshot_size = N`
+- Solver `data.train_batch_size = N`
+- Solver `actor_rollout_ref.actor.ppo_mini_batch_size = N`
+
+---
+
+## Preset A: N=3 (recommended first)
+
+### 1) Receiver
+
+```bash
+cd /workspace/verl/verl
+
+export QUESTION_EXPERIMENT_NAME=qwen2_0.5b_dual_v5_cycle_n3_val
+export DUAL_LOOP_FAIL_ON_TIMEOUT=true
+export DUAL_LOOP_CYCLE_TIMEOUT_S=1200
+export DUAL_LOOP_TRACE=true
+export DUAL_LOOP_TRACE_INCLUDE_TEXT=true
+export DUAL_LOOP_TRACE_MAX_TEXT_CHARS=220
+
+python3 -m verl.experimental.dynamic_dataset.question_reciever_v5_solver_questioner \
+  --host 127.0.0.1 \
+  --port 8080
+```
+
+### 2) Questioner (warm start from pretrain)
+
+```bash
+cd /workspace/verl/verl
+
+export QUESTION_EXPERIMENT_NAME=qwen2_0.5b_dual_questioner_v5_n3_val
+export CUDA_VISIBLE_DEVICES=1
+export DUAL_LOOP_COORDINATOR_URL='http://127.0.0.1:8080'
+unset PYTORCH_CUDA_ALLOC_CONF
+export PYTORCH_ALLOC_CONF=max_split_size_mb:64
+export DUAL_LOOP_TRACE=true
+export DUAL_LOOP_TRACE_INCLUDE_TEXT=true
+export DUAL_LOOP_TRACE_MAX_TEXT_CHARS=220
+
+# Warm-start checkpoint prep (remove data.pt to avoid stale iterator state)
+export PRETRAIN_ROOT=/workspace/verl/verl/checkpoints/verl_grpo_questioner_pretrain/qwen2_0.5b_questioner_pretrain_v1
+export PRETRAIN_STEP=$(cat "${PRETRAIN_ROOT}/latest_checkpointed_iteration.txt")
+export PRETRAIN_CKPT_PATH="${PRETRAIN_ROOT}/global_step_${PRETRAIN_STEP}"
+export PRETRAIN_WARM_PARENT=/tmp/pretrain_warmstart_qwen2_0_5b_n3
+export PRETRAIN_WARM_PATH="${PRETRAIN_WARM_PARENT}/global_step_${PRETRAIN_STEP}"
+mkdir -p "${PRETRAIN_WARM_PARENT}"
+rm -rf "${PRETRAIN_WARM_PATH}"
+cp -r "${PRETRAIN_CKPT_PATH}" "${PRETRAIN_WARM_PATH}"
+rm -f "${PRETRAIN_WARM_PATH}/data.pt"
+
+CUDA_VISIBLE_DEVICES=1 RAY_ADDRESS=local RAY_TMPDIR=/tmp/ray_questioner_v5_n3 PYTHONUNBUFFERED=1 \
+python3 -m verl.trainer.main_ppo \
+  algorithm.adv_estimator=grpo \
+  data.train_files=$HOME/data/gsm8k/train.parquet \
+  data.val_files=$HOME/data/gsm8k/test.parquet \
+  trainer.total_training_steps=1000 \
+  trainer.total_epochs=1000 \
+  data.dataloader_num_workers=0 \
+  data.filter_overlong_prompts_workers=0 \
+  data.train_batch_size=1 \
+  data.max_prompt_length=1024 \
+  data.max_response_length=1024 \
+  data.filter_overlong_prompts=True \
+  data.truncation='error' \
+  data.custom_cls.path='pkg://verl.experimental.dynamic_dataset.dynamicgen_dataset_v5_synth' \
+  data.custom_cls.name='DynamicGenDataset' \
+  data.datagen.path='pkg://verl.experimental.dynamic_dataset.http_gsm8k_datagen_v5_synth' \
+  data.datagen.name='HttpQuestionGeneratorV5Synth' \
+  +data.datagen.skip_base_dataset=true \
+  +data.datagen.coordinator_url='http://127.0.0.1:8080' \
+  +data.datagen.snapshot_size=1 \
+  +data.datagen.n_per_batch=1 \
+  +data.datagen.wait_s=5 \
+  +data.datagen.split=train \
+  +data.datagen.refresh_on_batch_end=true \
+  custom_reward_function.path='pkg://verl.experimental.dynamic_dataset.http_gsm8k_datagen_v5_synth' \
+  custom_reward_function.name='compute_synth_difficulty_score' \
+  +custom_reward_function.reward_kwargs.coordinator_url='http://127.0.0.1:8080' \
+  +custom_reward_function.reward_kwargs.submit_timeout_s=30 \
+  +custom_reward_function.reward_kwargs.wait_timeout_s=2400 \
+  +custom_reward_function.reward_kwargs.poll_interval_s=1.0 \
+  +custom_reward_function.reward_kwargs.require_numeric_final_answer=true \
+  +custom_reward_function.reward_kwargs.difficulty_target=0.5 \
+  +custom_reward_function.reward_kwargs.w_parse=0.2 \
+  +custom_reward_function.reward_kwargs.w_cycle_parse=0.4 \
+  +custom_reward_function.reward_kwargs.w_diff=0.8 \
+  +custom_reward_function.reward_kwargs.cycle_bonus=0.25 \
+  +custom_reward_function.reward_kwargs.difficulty_target_band=0.1 \
+  +custom_reward_function.reward_kwargs.fail_on_timeout=true \
+  +custom_reward_function.reward_kwargs.expected_cycle_size=3 \
+  +custom_reward_function.reward_kwargs.min_required_per_cycle=3 \
+  +custom_reward_function.reward_kwargs.cycle_timeout_s=1200 \
+  actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct \
+  actor_rollout_ref.rollout.calculate_log_probs=False \
+  actor_rollout_ref.actor.optim.lr=1e-6 \
+  actor_rollout_ref.rollout.agent.num_workers=1 \
+  actor_rollout_ref.model.use_remove_padding=True \
+  actor_rollout_ref.actor.ppo_mini_batch_size=1 \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.actor.use_kl_loss=True \
+  actor_rollout_ref.actor.kl_loss_coef=0.001 \
+  actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+  actor_rollout_ref.actor.entropy_coeff=0 \
+  actor_rollout_ref.model.enable_gradient_checkpointing=True \
+  actor_rollout_ref.actor.fsdp_config.param_offload=True \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+  actor_rollout_ref.rollout.name=vllm \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+  actor_rollout_ref.rollout.n=3 \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.ref.fsdp_config.param_offload=True \
+  reward_model.rollout.tensor_model_parallel_size=1 \
+  algorithm.use_kl_in_reward=False \
+  trainer.critic_warmup=0 \
+  trainer.log_val_generations=0 \
+  trainer.rollout_data_dir=/workspace/verl/verl/${QUESTION_EXPERIMENT_NAME} \
+  trainer.logger='["console","wandb"]' \
+  trainer.project_name='verl_grpo_dual_loop' \
+  trainer.experiment_name=${QUESTION_EXPERIMENT_NAME} \
+  trainer.resume_mode=resume_path \
+  trainer.resume_from_path=${PRETRAIN_WARM_PATH} \
+  trainer.n_gpus_per_node=1 \
+  trainer.nnodes=1 \
+  trainer.save_freq=20 \
+  trainer.test_freq=1000000 \
+  trainer.val_before_train=false \
+  | tee ${QUESTION_EXPERIMENT_NAME}.log
+```
+
+### 3) Solver (validation ON)
+
+```bash
+cd /workspace/verl/verl
+
+export QUESTION_EXPERIMENT_NAME=qwen2_0.5b_dual_solver_v5_n3_val
+export CUDA_VISIBLE_DEVICES=0
+export DUAL_LOOP_COORDINATOR_URL='http://127.0.0.1:8080'
+unset PYTORCH_CUDA_ALLOC_CONF
+export PYTORCH_ALLOC_CONF=max_split_size_mb:64
+export DUAL_LOOP_TRACE=true
+export DUAL_LOOP_TRACE_INCLUDE_TEXT=true
+export DUAL_LOOP_TRACE_MAX_TEXT_CHARS=220
+
+CUDA_VISIBLE_DEVICES=0 RAY_ADDRESS=local RAY_TMPDIR=/tmp/ray_solver_v5_n3 PYTHONUNBUFFERED=1 \
+python3 -m verl.trainer.main_ppo \
+  algorithm.adv_estimator=grpo \
+  data.train_files=$HOME/data/gsm8k/train.parquet \
+  data.val_files=$HOME/data/gsm8k/test.parquet \
+  trainer.total_training_steps=1000 \
+  trainer.total_epochs=1000 \
+  data.dataloader_num_workers=0 \
+  data.filter_overlong_prompts_workers=0 \
+  data.train_batch_size=3 \
+  data.max_prompt_length=512 \
+  data.max_response_length=1024 \
+  data.filter_overlong_prompts=True \
+  data.truncation='error' \
+  data.custom_cls.path='pkg://verl.experimental.dynamic_dataset.dynamicgen_dataset_v5_solver' \
+  data.custom_cls.name='DynamicGenDataset' \
+  data.datagen.path='pkg://verl.experimental.dynamic_dataset.http_gsm8k_datagen_v5_solver' \
+  data.datagen.name='HttpQuestionGeneratorV5Solver' \
+  +data.datagen.skip_base_dataset=true \
+  +data.datagen.coordinator_url='http://127.0.0.1:8080' \
+  +data.datagen.snapshot_size=3 \
+  +data.datagen.n_per_batch=3 \
+  +data.datagen.timeout_s=25 \
+  +data.datagen.wait_s=30 \
+  +data.datagen.split=train \
+  +data.datagen.strict_response_post=false \
+  +data.datagen.refresh_on_batch_end=true \
+  actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct \
+  actor_rollout_ref.rollout.calculate_log_probs=False \
+  actor_rollout_ref.actor.optim.lr=1e-6 \
+  actor_rollout_ref.rollout.agent.num_workers=1 \
+  actor_rollout_ref.model.use_remove_padding=True \
+  actor_rollout_ref.actor.ppo_mini_batch_size=3 \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.actor.use_kl_loss=True \
+  actor_rollout_ref.actor.kl_loss_coef=0.001 \
+  actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+  actor_rollout_ref.actor.entropy_coeff=0 \
+  actor_rollout_ref.model.enable_gradient_checkpointing=True \
+  actor_rollout_ref.actor.fsdp_config.param_offload=True \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+  actor_rollout_ref.rollout.name=vllm \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+  actor_rollout_ref.rollout.n=10 \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.ref.fsdp_config.param_offload=True \
+  reward_model.rollout.tensor_model_parallel_size=1 \
+  algorithm.use_kl_in_reward=False \
+  trainer.critic_warmup=0 \
+  trainer.log_val_generations=1 \
+  trainer.rollout_data_dir=/workspace/verl/verl/${QUESTION_EXPERIMENT_NAME} \
+  trainer.logger='["console","wandb"]' \
+  trainer.project_name='verl_grpo_dual_loop' \
+  trainer.experiment_name=${QUESTION_EXPERIMENT_NAME} \
+  trainer.n_gpus_per_node=1 \
+  trainer.nnodes=1 \
+  trainer.save_freq=20 \
+  trainer.test_freq=50 \
+  trainer.val_before_train=false \
+  | tee ${QUESTION_EXPERIMENT_NAME}.log
+```
+
+---
+
+## Preset B: N=16 stress test (single-GPU target style)
+
+Use this only after `N=3` is stable.
+
+### 1) Receiver
+
+```bash
+cd /workspace/verl/verl
+
+export QUESTION_EXPERIMENT_NAME=qwen2_0.5b_dual_v5_cycle_n16_val
+export DUAL_LOOP_FAIL_ON_TIMEOUT=true
+export DUAL_LOOP_CYCLE_TIMEOUT_S=3600
+export DUAL_LOOP_TRACE=true
+export DUAL_LOOP_TRACE_INCLUDE_TEXT=true
+export DUAL_LOOP_TRACE_MAX_TEXT_CHARS=220
+
+python3 -m verl.experimental.dynamic_dataset.question_reciever_v5_solver_questioner \
+  --host 127.0.0.1 \
+  --port 8080
+```
+
+### 2) Questioner (N=16)
+
+```bash
+cd /workspace/verl/verl
+
+export QUESTION_EXPERIMENT_NAME=qwen2_0.5b_dual_questioner_v5_n16_val
+export CUDA_VISIBLE_DEVICES=1
+export DUAL_LOOP_COORDINATOR_URL='http://127.0.0.1:8080'
+unset PYTORCH_CUDA_ALLOC_CONF
+export PYTORCH_ALLOC_CONF=max_split_size_mb:64
+export DUAL_LOOP_TRACE=true
+export DUAL_LOOP_TRACE_INCLUDE_TEXT=true
+export DUAL_LOOP_TRACE_MAX_TEXT_CHARS=220
+
+export PRETRAIN_ROOT=/workspace/verl/verl/checkpoints/verl_grpo_questioner_pretrain/qwen2_0.5b_questioner_pretrain_v1
+export PRETRAIN_STEP=$(cat "${PRETRAIN_ROOT}/latest_checkpointed_iteration.txt")
+export PRETRAIN_CKPT_PATH="${PRETRAIN_ROOT}/global_step_${PRETRAIN_STEP}"
+export PRETRAIN_WARM_PARENT=/tmp/pretrain_warmstart_qwen2_0_5b_n16
+export PRETRAIN_WARM_PATH="${PRETRAIN_WARM_PARENT}/global_step_${PRETRAIN_STEP}"
+mkdir -p "${PRETRAIN_WARM_PARENT}"
+rm -rf "${PRETRAIN_WARM_PATH}"
+cp -r "${PRETRAIN_CKPT_PATH}" "${PRETRAIN_WARM_PATH}"
+rm -f "${PRETRAIN_WARM_PATH}/data.pt"
+
+CUDA_VISIBLE_DEVICES=1 RAY_ADDRESS=local RAY_TMPDIR=/tmp/ray_questioner_v5_n16 PYTHONUNBUFFERED=1 \
+python3 -m verl.trainer.main_ppo \
+  algorithm.adv_estimator=grpo \
+  data.train_files=$HOME/data/gsm8k/train.parquet \
+  data.val_files=$HOME/data/gsm8k/test.parquet \
+  trainer.total_training_steps=10000 \
+  trainer.total_epochs=1000 \
+  data.dataloader_num_workers=0 \
+  data.filter_overlong_prompts_workers=0 \
+  data.train_batch_size=1 \
+  data.max_prompt_length=1024 \
+  data.max_response_length=1024 \
+  data.filter_overlong_prompts=True \
+  data.truncation='error' \
+  data.custom_cls.path='pkg://verl.experimental.dynamic_dataset.dynamicgen_dataset_v5_synth' \
+  data.custom_cls.name='DynamicGenDataset' \
+  data.datagen.path='pkg://verl.experimental.dynamic_dataset.http_gsm8k_datagen_v5_synth' \
+  data.datagen.name='HttpQuestionGeneratorV5Synth' \
+  +data.datagen.skip_base_dataset=true \
+  +data.datagen.coordinator_url='http://127.0.0.1:8080' \
+  +data.datagen.snapshot_size=1 \
+  +data.datagen.n_per_batch=1 \
+  +data.datagen.wait_s=5 \
+  +data.datagen.split=train \
+  +data.datagen.refresh_on_batch_end=true \
+  custom_reward_function.path='pkg://verl.experimental.dynamic_dataset.http_gsm8k_datagen_v5_synth' \
+  custom_reward_function.name='compute_synth_difficulty_score' \
+  +custom_reward_function.reward_kwargs.coordinator_url='http://127.0.0.1:8080' \
+  +custom_reward_function.reward_kwargs.submit_timeout_s=60 \
+  +custom_reward_function.reward_kwargs.wait_timeout_s=7200 \
+  +custom_reward_function.reward_kwargs.poll_interval_s=1.0 \
+  +custom_reward_function.reward_kwargs.require_numeric_final_answer=true \
+  +custom_reward_function.reward_kwargs.difficulty_target=0.5 \
+  +custom_reward_function.reward_kwargs.w_parse=0.2 \
+  +custom_reward_function.reward_kwargs.w_cycle_parse=0.4 \
+  +custom_reward_function.reward_kwargs.w_diff=0.8 \
+  +custom_reward_function.reward_kwargs.cycle_bonus=0.25 \
+  +custom_reward_function.reward_kwargs.difficulty_target_band=0.1 \
+  +custom_reward_function.reward_kwargs.fail_on_timeout=true \
+  +custom_reward_function.reward_kwargs.expected_cycle_size=16 \
+  +custom_reward_function.reward_kwargs.min_required_per_cycle=16 \
+  +custom_reward_function.reward_kwargs.cycle_timeout_s=3600 \
+  actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct \
+  actor_rollout_ref.rollout.calculate_log_probs=False \
+  actor_rollout_ref.actor.optim.lr=1e-6 \
+  actor_rollout_ref.rollout.agent.num_workers=1 \
+  actor_rollout_ref.model.use_remove_padding=True \
+  actor_rollout_ref.actor.ppo_mini_batch_size=1 \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.actor.use_kl_loss=True \
+  actor_rollout_ref.actor.kl_loss_coef=0.001 \
+  actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+  actor_rollout_ref.actor.entropy_coeff=0 \
+  actor_rollout_ref.model.enable_gradient_checkpointing=True \
+  actor_rollout_ref.actor.fsdp_config.param_offload=True \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+  actor_rollout_ref.rollout.name=vllm \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+  actor_rollout_ref.rollout.n=16 \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.ref.fsdp_config.param_offload=True \
+  reward_model.rollout.tensor_model_parallel_size=1 \
+  algorithm.use_kl_in_reward=False \
+  trainer.critic_warmup=0 \
+  trainer.log_val_generations=0 \
+  trainer.rollout_data_dir=/workspace/verl/verl/${QUESTION_EXPERIMENT_NAME} \
+  trainer.logger='["console","wandb"]' \
+  trainer.project_name='verl_grpo_dual_loop' \
+  trainer.experiment_name=${QUESTION_EXPERIMENT_NAME} \
+  trainer.resume_mode=resume_path \
+  trainer.resume_from_path=${PRETRAIN_WARM_PATH} \
+  trainer.n_gpus_per_node=1 \
+  trainer.nnodes=1 \
+  trainer.save_freq=20 \
+  trainer.test_freq=1000000 \
+  trainer.val_before_train=false \
+  | tee ${QUESTION_EXPERIMENT_NAME}.log
+```
+
+### 3) Solver (N=16; closer to your single-GPU baseline style)
+
+```bash
+cd /workspace/verl/verl
+
+export QUESTION_EXPERIMENT_NAME=qwen2_0.5b_dual_solver_v5_n16_val
+export CUDA_VISIBLE_DEVICES=0
+export DUAL_LOOP_COORDINATOR_URL='http://127.0.0.1:8080'
+unset PYTORCH_CUDA_ALLOC_CONF
+export PYTORCH_ALLOC_CONF=expandable_segments:True,max_split_size_mb:64
+export DUAL_LOOP_TRACE=true
+export DUAL_LOOP_TRACE_INCLUDE_TEXT=true
+export DUAL_LOOP_TRACE_MAX_TEXT_CHARS=220
+
+CUDA_VISIBLE_DEVICES=0 RAY_ADDRESS=local RAY_TMPDIR=/tmp/ray_solver_v5_n16 PYTHONUNBUFFERED=1 \
+python3 -m verl.trainer.main_ppo \
+  algorithm.adv_estimator=grpo \
+  data.train_files=$HOME/data/gsm8k/train.parquet \
+  data.val_files=$HOME/data/gsm8k/test.parquet \
+  trainer.total_training_steps=1000 \
+  trainer.total_epochs=1000 \
+  data.dataloader_num_workers=0 \
+  data.filter_overlong_prompts_workers=0 \
+  data.train_batch_size=16 \
+  data.max_prompt_length=512 \
+  data.max_response_length=1024 \
+  data.filter_overlong_prompts=True \
+  data.truncation='error' \
+  data.custom_cls.path='pkg://verl.experimental.dynamic_dataset.dynamicgen_dataset_v5_solver' \
+  data.custom_cls.name='DynamicGenDataset' \
+  data.datagen.path='pkg://verl.experimental.dynamic_dataset.http_gsm8k_datagen_v5_solver' \
+  data.datagen.name='HttpQuestionGeneratorV5Solver' \
+  +data.datagen.skip_base_dataset=true \
+  +data.datagen.coordinator_url='http://127.0.0.1:8080' \
+  +data.datagen.snapshot_size=16 \
+  +data.datagen.n_per_batch=16 \
+  +data.datagen.timeout_s=30 \
+  +data.datagen.wait_s=60 \
+  +data.datagen.split=train \
+  +data.datagen.strict_response_post=false \
+  +data.datagen.refresh_on_batch_end=true \
+  actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct \
+  actor_rollout_ref.rollout.calculate_log_probs=False \
+  actor_rollout_ref.actor.optim.lr=1e-6 \
+  actor_rollout_ref.rollout.agent.num_workers=1 \
+  actor_rollout_ref.model.use_remove_padding=True \
+  actor_rollout_ref.actor.ppo_mini_batch_size=16 \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.actor.use_kl_loss=True \
+  actor_rollout_ref.actor.kl_loss_coef=0.001 \
+  actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+  actor_rollout_ref.actor.entropy_coeff=0 \
+  actor_rollout_ref.model.enable_gradient_checkpointing=True \
+  actor_rollout_ref.actor.fsdp_config.param_offload=True \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+  actor_rollout_ref.rollout.name=vllm \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+  actor_rollout_ref.rollout.n=10 \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.ref.fsdp_config.param_offload=True \
+  reward_model.rollout.tensor_model_parallel_size=1 \
+  algorithm.use_kl_in_reward=False \
+  trainer.critic_warmup=0 \
+  trainer.log_val_generations=1 \
+  trainer.rollout_data_dir=/workspace/verl/verl/${QUESTION_EXPERIMENT_NAME} \
+  trainer.logger='["console","wandb"]' \
+  trainer.project_name='verl_grpo_dual_loop' \
+  trainer.experiment_name=${QUESTION_EXPERIMENT_NAME} \
+  trainer.n_gpus_per_node=1 \
+  trainer.nnodes=1 \
+  trainer.save_freq=20 \
+  trainer.test_freq=100 \
+  trainer.val_before_train=false \
+  | tee ${QUESTION_EXPERIMENT_NAME}.log
+```
+
+---
+
+## Quick health checks
+
+```bash
+curl -s http://127.0.0.1:8080/health
+curl -s http://127.0.0.1:8080/debug/state
+watch -n 1 "curl -s http://127.0.0.1:8080/health"
+```
+
+## If N=16 stalls, change these first
+- Increase receiver and reward timeouts:
+  - `DUAL_LOOP_CYCLE_TIMEOUT_S=5400`
+  - `wait_timeout_s=10800`
+  - `cycle_timeout_s=5400`
+- Reduce solver validation frequency:
+  - `trainer.test_freq=200`
+- Keep N symmetry strict across questioner and solver configs.
+
+## Notes on retry/fill behavior
+Current v5 cycle gating is strict (`min_required_per_cycle=N`).
+- If you want partial rescue behavior (retry/fill when parse fails), that requires a small coordinator-side enhancement.
+- For now, practical substitute is longer timeouts + warm-start + stricter parsing reward shaping.

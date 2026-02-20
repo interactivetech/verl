@@ -8,12 +8,17 @@
 **/playground
 **/wandb
 
+nohup.out
+
 *.jsonl
 question_reciever/
 qwen2_0.5b_single_gpu_dual_remote4/
 qwen2_0.5b_single_gpu_dual_remote4_questions_asked_answered/
 remote-venv/
 rollout_data_0.5b-*/
+
+"verl/experimental/dynamic_dataset/Screenshot 2026-02-18 at 11.53.25\342\200\257AM.png"
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

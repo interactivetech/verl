@@ -17,6 +17,7 @@ Metrics related to the PPO trainer.
 
 from collections import defaultdict
 from functools import partial
+from numbers import Number
 from typing import Any, Callable
 
 import numpy as np
@@ -552,6 +553,13 @@ def process_validation_metrics(
         >>> result = process_validation_metrics(data_sources, sample_uids, infos_dict)
         >>> # result will contain statistics for each data source and variable
     """
+    def _to_finite_float(v: Any) -> float | None:
+        if isinstance(v, Number):
+            f = float(v)
+            if np.isfinite(f):
+                return f
+        return None
+
     # Group metrics by data source, prompt and variable
     data_src2uid2var2vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for sample_idx, data_source in enumerate(data_sources):
@@ -593,16 +601,27 @@ def process_validation_metrics(
             var_dict = uid_dict.setdefault(uid, {})
 
             for var_name, var_vals in var2vals.items():
-                # skip empty or string values
-                if not var_vals or isinstance(var_vals[0], str):
+                # skip empty values
+                if not var_vals:
+                    continue
+
+                # keep only finite numeric values; ignore None / strings / objects
+                valid_idx = []
+                numeric_vals = []
+                for i, val in enumerate(var_vals):
+                    num = _to_finite_float(val)
+                    if num is not None:
+                        valid_idx.append(i)
+                        numeric_vals.append(num)
+                if not numeric_vals:
                     continue
 
                 # compute mean and std
-                n_resps = len(var_vals)
-                metric = {f"mean@{n_resps}": float(np_mean(var_vals))}
+                n_resps = len(numeric_vals)
+                metric = {f"mean@{n_resps}": float(np_mean(numeric_vals))}
 
                 if n_resps > 1:
-                    metric[f"std@{n_resps}"] = float(np_std(var_vals))
+                    metric[f"std@{n_resps}"] = float(np_std(numeric_vals))
 
                     # cache ns list
                     if n_resps not in ns_cache:
@@ -613,7 +632,7 @@ def process_validation_metrics(
                     for n in ns:
                         # compute best/worst metrics
                         (bon_mean, bon_std), (won_mean, won_std) = bootstrap_metric(
-                            data=var_vals,
+                            data=numeric_vals,
                             subset_size=n,
                             reduce_fns=reduce_fns_best_worst,
                             n_bootstrap=n_bootstrap,
@@ -626,9 +645,13 @@ def process_validation_metrics(
 
                         # compute maj metrics
                         if has_pred:
+                            pred_vals_filtered = [pred_vals[i] for i in valid_idx]
+                            if all(pred is None for pred in pred_vals_filtered):
+                                continue
                             # create vote_data
                             vote_data = [
-                                {"val": val, "pred": pred} for val, pred in zip(var_vals, pred_vals, strict=True)
+                                {"val": val, "pred": pred}
+                                for val, pred in zip(numeric_vals, pred_vals_filtered, strict=True)
                             ]
                             # compute maj metrics
                             [(maj_n_mean, maj_n_std)] = bootstrap_metric(
@@ -655,5 +678,9 @@ def process_validation_metrics(
     for data_source, var2metric2uid_vals in data_src2var2metric2uid_vals.items():
         for var_name, metric2uid_vals in var2metric2uid_vals.items():
             for metric_name, uid_vals in metric2uid_vals.items():
-                data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(uid_vals)
+                numeric_uid_vals = [_to_finite_float(v) for v in uid_vals]
+                numeric_uid_vals = [v for v in numeric_uid_vals if v is not None]
+                if not numeric_uid_vals:
+                    continue
+                data_src2var2metric2val[data_source][var_name][metric_name] = float(np.mean(numeric_uid_vals))
     return data_src2var2metric2val
